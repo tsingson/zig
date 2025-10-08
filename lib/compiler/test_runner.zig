@@ -2,6 +2,7 @@
 const builtin = @import("builtin");
 
 const std = @import("std");
+const Io = std.Io;
 const fatal = std.process.fatal;
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -16,6 +17,7 @@ var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
 var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
 var stdout_buffer: [4096]u8 = undefined;
+var runner_threaded_io: Io.Threaded = .init_single_threaded;
 
 const crippled = switch (builtin.zig_backend) {
     .stage2_aarch64,
@@ -61,8 +63,6 @@ pub fn main() void {
         fuzz_abi.fuzzer_init(.fromSlice(cache_dir));
     }
 
-    fba.reset();
-
     if (listen) {
         return mainServer() catch @panic("internal test runner failure");
     } else {
@@ -72,7 +72,7 @@ pub fn main() void {
 
 fn mainServer() !void {
     @disableInstrumentation();
-    var stdin_reader = std.fs.File.stdin().readerStreaming(&stdin_buffer);
+    var stdin_reader = std.fs.File.stdin().readerStreaming(runner_threaded_io.io(), &stdin_buffer);
     var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buffer);
     var server = try std.zig.Server.init(.{
         .in = &stdin_reader.interface,
@@ -129,7 +129,7 @@ fn mainServer() !void {
 
             .run_test => {
                 testing.allocator_instance = .{};
-                testing.io_instance = .init(fba.allocator());
+                testing.io_instance = .init(testing.allocator);
                 log_err_count = 0;
                 const index = try server.receiveBody_u32();
                 const test_fn = builtin.test_functions[index];
@@ -146,7 +146,6 @@ fn mainServer() !void {
                     },
                 };
                 testing.io_instance.deinit();
-                fba.reset();
                 const leak = testing.allocator_instance.deinit() == .leak;
                 try server.serveTestResults(.{
                     .index = index,
@@ -223,10 +222,10 @@ fn mainTerminal() void {
     var leaks: usize = 0;
     for (test_fn_list, 0..) |test_fn, i| {
         testing.allocator_instance = .{};
-        testing.io_instance = .init(fba.allocator());
+        testing.io_instance = .init(testing.allocator);
         defer {
-            if (testing.allocator_instance.deinit() == .leak) leaks += 1;
             testing.io_instance.deinit();
+            if (testing.allocator_instance.deinit() == .leak) leaks += 1;
         }
         testing.log_level = .warn;
 
@@ -313,7 +312,7 @@ pub fn mainSimple() anyerror!void {
         .stage2_aarch64, .stage2_riscv64 => true,
         else => false,
     };
-    // is the backend capable of calling `std.Io.Writer.print`?
+    // is the backend capable of calling `Io.Writer.print`?
     const enable_print = switch (builtin.zig_backend) {
         .stage2_aarch64, .stage2_riscv64 => true,
         else => false,
